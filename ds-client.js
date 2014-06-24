@@ -1,10 +1,13 @@
 'use strict';
 
-var https = require('https'),
-    events = require('events');
+var https = require('http'),
+    events = require('events'),
+    _ = require('underscore');
 
 var dsUrl = '',
-    listener = new events.EventEmitter();
+    listener = new events.EventEmitter(),
+    port = 80,
+    registeredFunctions = {};
 
 
 
@@ -27,8 +30,8 @@ var register = function (manufacturerKey, deviceIdentifier, callback) {
 
     var reqOpts = {
         hostname: dsUrl,
-        port: 443,
-        path: '/register/' + manufacturerKey + '/' + deviceIdentifier,
+        port: port,
+        path: '/ds/v1/register/' + manufacturerKey + '/' + deviceIdentifier,
         method: 'GET'
     };
 
@@ -39,7 +42,9 @@ var register = function (manufacturerKey, deviceIdentifier, callback) {
         });
 
         res.on('end', function () {
-            callback(JSON.parse(resData));
+            var returnData = JSON.parse(resData);
+            if (returnData.error) throw returnData.error;
+            else callback(returnData.device_key);
         });
     });
 
@@ -57,29 +62,92 @@ var declare = function (deviceKey, metaData, callback) {
 
     var reqOpts = {
         hostname: dsUrl,
-        port: 443,
-        path: '/declare/' + deviceKey,
+        port: port,
+        path: '/ds/v1/declare/' + deviceKey,
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'Content-Length': postData.length
+            'Content-Length': Buffer.byteLength(postData)
         }
     };
 
     var req = https.request(reqOpts, function (res) {
-        var resData = '';
-        res.on('data', function (chunk) {
-            resData += chunk;
-        });
+        //var resData = '';
+        //res.on('data', function (chunk) {
+        //    resData += chunk;
+        //});
 
-        res.on('end', function () {
-            callback(JSON.parse(resData));
-        });
+        //res.on('end', function () {
+        //    callback(JSON.parse(resData));
+        //});
     });
 
     req.write(postData);
     req.end();
 };
+
+
+
+//================================
+//  Register New functions
+//================================
+
+var addFunctions = function (functions, callback) {
+    // addFunctions('name', function () {}, callback);
+    if (_.isString(functions) && _.isFunction(callback)) {
+        callback = arguments[2] || function () {};
+        registeredFunctions[functions] = callback;
+
+    // addFunctions({name1: function () {}, name2: function () {}}, callback);
+    } else if (_.isObject(functions)) {
+        callback = callback || function () {};
+        for (var fn in functions) {
+            if (_.isFunction(functions[fn])) registeredFunctions[fn] = functions[fn];
+        }
+    }
+    
+    callback();
+};
+
+
+
+//================================
+//  Remove registered functions
+//================================
+
+var rmFunctions = function (functions, callback) {
+    callback = callback || function () {};
+
+    // If string
+    if (_.isString(functions)) {
+        delete registeredFunctions[functions];
+
+    // If array
+    } else if (_.isArray(functions)) {
+        for (var fn in functions) {
+            // If array of strings
+            if (_.isString(functions[fn])) {
+                delete registeredFunctions[functions[fn]];
+
+            // If array of functions
+            } else if (_.isFunction(functions[fn])) {
+                for (var regFn in registeredFunctions) {
+                    if (registeredFunctions[regFn].toString() === functions[fn].toString()) {
+                        delete registeredFunctions[regFn];
+                        break;
+                    }
+                }
+            }
+        }
+    } else if (_.isObject(functions)) {
+        for (var fn in functions) {
+            delete registeredFunctions[fn];
+        }
+    }
+
+    callback();
+};
+
 
 
 //================================
@@ -92,24 +160,24 @@ var states = function (deviceId, statesData, callback) {
 
     var reqOpts = {
         hostname: dsUrl,
-        port: 443,
-        path: '/states/' + deviceId,
+        port: port,
+        path: '/ds/v1/states/' + deviceId,
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'Content-Length': postData.length
+            'Content-Length': Buffer.byteLength(postData)
         }
     };
 
     var req = https.request(reqOpts, function (res) {
-        var resData = '';
-        res.on('data', function (chunk) {
-            resData += chunk;
-        });
+        //var resData = '';
+        //res.on('data', function (chunk) {
+        //    resData += chunk;
+        //});
 
-        res.on('end', function () {
-            callback(JSON.parse(resData));
-        });
+        //res.on('end', function () {
+        //    callback(JSON.parse(resData));
+        //});
     });
 
     req.write(postData);
@@ -125,33 +193,53 @@ var states = function (deviceId, statesData, callback) {
 var listen = function (deviceKey, callback) {
     callback = callback || function () {};
 
+    var resHandler;
+
     var reqOpts = {
         hostname: dsUrl,
-        port: 443,
-        path: '/register/' + manufacturerKey + '/' + deviceIdentifier,
+        port: port,
+        path: '/ds/v1/listen/' + deviceKey,
         method: 'GET'
     };
 
     var req = https.request(reqOpts, function (res) {
-        var resData = '';
+        var resHandler = res;
+
+        var resData = '',
+            commandData;
 
         res.on('data', function (chunk) {
+            resData += chunk;
+
             try {
-                callback(JSON.parse(resData));
+                commandData = JSON.parse(resData);
+                resData = '';
+                
+                if (!commandData.error) {
+                    // Run the actual function!
+                    if (commandData.function_id && registeredFunctions[commandData.function_id]) {
+                        registeredFunctions[commandData.function_id](commandData.params);
+                    } 
+                } else {
+                    throw commandData.error;
+                }
             } catch (err) {
                 resData += chunk;
             }
         });
     });
 
+    req.end();
+    callback();
+
     listener.on('stopListening', function () {
-        req.end();
+        resHandler.end();
     });
 };
 
 
 //================================
-//  Listen to commands
+//  Stop listening to commands
 //================================
 
 var stop = function () {
@@ -159,9 +247,16 @@ var stop = function () {
 };
 
 
+
+//================================
+//  Export
+//================================
+
 module.exports = {
     init: init,
     register: register,
+    addFunctions: addFunctions,
+    rmFunctions: rmFunctions,
     declare: declare,
     states: states,
     listen: listen,
